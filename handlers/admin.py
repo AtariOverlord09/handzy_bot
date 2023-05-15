@@ -9,8 +9,12 @@ from dotenv import load_dotenv
 
 from database import sqlite_db
 from validators import admin_validators as valid
-from keyboards import admin_kb as admn_kb, admin_inline_kb as admn_inl_kb
-from core import promo_creator as create
+from keyboards import (
+    admin_kb as admn_kb,
+    admin_inline_kb as admn_inl_kb,
+    client_inline as cli,
+)
+from core import promo_creator as create, order_id_finder as oif
 
 
 load_dotenv()
@@ -65,6 +69,14 @@ class FSMOrdersAndUsers(StatesGroup):
     edit_name = State()
     confirm_user_changes = State()
     user_delete = State()
+    send_requisites = State()
+    confirm_req_send = State()
+    req_send_to_user = State()
+    ready_to_pick = State()
+    ready_to_pick_confirm = State()
+    ready_to_pick_mess = State()
+    ready_to_pick_ins = State()
+    ready_ok = State()
 
 
 class FSMMoneyInfo(StatesGroup):
@@ -136,9 +148,7 @@ async def main_menu(callback: CallbackQuery, state: State):
 async def admin_menu(message: Message, state: FSMContext):
 
     user_id = message.chat.id
-    print(user_id)
     admin = await sqlite_db.get_admin(user_id)
-    print(admin)
 
     if admin:
         admin_kb = admn_kb.AdminMenuKeyboard()
@@ -154,7 +164,6 @@ async def admin_menu(message: Message, state: FSMContext):
 
 
 # Функции меню админа
-
 async def comission_change(message: Message, state: FSMContext):
 
     await message.answer(
@@ -233,7 +242,10 @@ async def back(callback: CallbackQuery, state: FSMContext):
 
 
 async def change_requisites(message: Message, state: FSMContext):
-    await message.answer("Введите номер карты для реквизита")
+    await message.answer(
+        "Введите номер карты для реквизита",
+        reply_markup=INLN_KB.card_main
+    )
     await state.set_state(FSMMoneyInfo.change_requisites)
 
 
@@ -526,8 +538,7 @@ async def order_menu(callback: CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
 
     page_number = int(callback.data.split("#")[1]) if "#" in callback.data else 1
-    print("Пик-Пик!")
-    print(current_state)
+
     if str(current_state) in str(FSMOrdersAndUsers.user_detail):
 
         data = await state.get_data()
@@ -557,8 +568,16 @@ async def order_menu(callback: CallbackQuery, state: FSMContext):
 
 async def confirm_changes(callback: CallbackQuery, state: FSMContext):
 
+    current_state = await state.get_state()
+
     async with state.proxy() as data:
         await sqlite_db.sql_add_order(data["order_edit_data"], edit=True)
+
+    print(current_state)
+
+    if str(current_state) in str(FSMOrdersAndUsers.ready_to_pick_confirm):
+        print("here")
+        return await send_requisites(callback, state)
 
     callback.message.text = data["order_edit_data"][0]
     await state.set_state(FSMOrdersAndUsers.order_menu)
@@ -580,6 +599,7 @@ async def cancel_changes(callback: CallbackQuery, state: FSMContext):
 async def order_detail(message: Message, state=FSMContext):
 
     current_state = await state.get_state()
+
     if str(current_state) in (
         str(FSMOrdersAndUsers.order_menu)
     ) or str(current_state) in (
@@ -587,7 +607,8 @@ async def order_detail(message: Message, state=FSMContext):
     ):
 
         order = await sqlite_db.get_order_detail(message.text)
-        user = await sqlite_db.sql_check_user("user_id", order[11])
+        if order:
+            user = await sqlite_db.sql_check_user("user_id", order[11])
     else:
         order = True
 
@@ -725,15 +746,25 @@ async def change_additional_info(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.set_state(FSMOrdersAndUsers.change_additional_info)
 
-    if not data["order_data"][13]:
+    if not data["order_data"][13] or not data["order_data"][5]:
         await callback.message.edit_text(
             "Введите дополнительную информацию",
             reply_markup=await INLN_KB.get_order_stage1_kb()
         )
+    if data["order_data"][5] and not data["order_data"][13]:
+        await callback.message.edit_text(
+            f"Доп. информация заказа: {data['order_data'][5]}\n\n"
+            "Введите дополнительную информацию",
+            reply_markup=await INLN_KB.get_order_stage1_kb()
+        )
     else:
+        capt = (
+            f"Доп. информация заказа: {data['order_data'][5]}\n\n"
+            "Введите дополнительную информацию"
+        )
         await callback.message.answer_photo(
             photo=data["order_data"][13],
-            caption="Введите дополнительную информацию",
+            caption=capt,
             reply_markup=await INLN_KB.get_order_stage1_kb(),
         )
 
@@ -807,14 +838,22 @@ async def change_status_confirm(callback: CallbackQuery, state: FSMContext):
     async with state.proxy() as data:
         data["status"] = callback.data
 
+    status_map = data["status_map"]
+    status = status_map.get(data["status"])
+
     await callback.message.edit_text(
-        f"Выбранный статус: {callback.message.text}.\n"
+        f"Выбранный статус: {status}.\n"
         "Хотите добавить сообщение для пользователя?",
         reply_markup=await INLN_KB.get_text_to_user_kb(),
     )
 
+    if status == "Готов к выдаче":
+        await state.set_state(FSMOrdersAndUsers.ready_to_pick)
+
 
 async def skip_message(callback: CallbackQuery, state: FSMContext):
+
+    current_state = await state.get_state()
 
     admin = await sqlite_db.get_admin(callback.message.chat.id)
     admin_contact = admin[3]
@@ -834,18 +873,30 @@ async def skip_message(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "Сообщение отправлено пользователю!",
     )
-    await state.set_state(FSMOrdersAndUsers.skip_message)
+
     async with state.proxy() as data:
         order_data = data.get("order_data", ())
         order_data = order_data[:10] + (status,) + order_data[11:]
         data["order_edit_data"] = order_data
     callback.message.text = data["order_data"][0]
 
+
+    if str(current_state) in str(FSMOrdersAndUsers.ready_to_pick):
+        await state.set_state(FSMOrdersAndUsers.ready_to_pick_confirm)
+    else:
+        await state.set_state(FSMOrdersAndUsers.skip_message)
+
     await order_detail(callback.message, state)
 
 
 async def message_insert(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(FSMOrdersAndUsers.message_insert)
+
+    current_state = await state.get_state()
+    if str(current_state) in str(FSMOrdersAndUsers.ready_to_pick):
+        await state.set_state(FSMOrdersAndUsers.ready_to_pick_ins)
+    else:
+        await state.set_state(FSMOrdersAndUsers.message_insert)
+
     await callback.message.edit_text(
         "Введите сообщение",
         reply_markup=await INLN_KB.get_text_to_user_kb(),
@@ -853,6 +904,8 @@ async def message_insert(callback: CallbackQuery, state: FSMContext):
 
 
 async def message_send(message: Message, state: FSMContext):
+
+    current_state = await state.get_state()
 
     data = await state.get_data()
     status_map = data["status_map"]
@@ -872,8 +925,82 @@ async def message_send(message: Message, state: FSMContext):
         order_data = order_data[:10] + (status,) + order_data[11:]
         data["order_edit_data"] = order_data
 
-    await state.set_state(FSMOrdersAndUsers.message_send)
+    if str(current_state) in str(FSMOrdersAndUsers.ready_to_pick_ins):
+        await state.set_state(FSMOrdersAndUsers.ready_to_pick_confirm)
+    else:
+        await state.set_state(FSMOrdersAndUsers.message_send)
     await order_detail(message, state)
+
+
+async def send_requisites(callback: CallbackQuery, state: FSMContext):
+
+    current_state = await state.get_state()
+
+    data = await state.get_data()
+    user_data = data["user_data"]
+    order_data = data["order_data"]
+    money_info = await sqlite_db.get_money_info()
+    async with state.proxy() as data:
+        data["money_info"] = money_info
+
+    await callback.message.edit_text(
+        f"Отправить реквизиты пользователю {user_data[9]}\n"
+        f"Заказ: {order_data[0]}\n"
+        f"Данные раздела оплаты: {money_info[3]}",
+        reply_markup=await INLN_KB.get_send_req_kb(),
+    )
+
+    if str(current_state) in str(FSMOrdersAndUsers.order_detail):
+        await state.set_state(FSMOrdersAndUsers.confirm_req_send)
+    else:
+        await state.set_state(FSMOrdersAndUsers.ready_ok)
+
+
+async def confirm_req_send(callback: CallbackQuery, state: FSMContext):
+
+    await callback.message.edit_text(
+        "Реквизиты отправлены пользователю!",
+    )
+
+    data = await state.get_data()
+    order_id = data["order_data"][0]
+    callback.message.text = order_id
+    await state.set_state(FSMOrdersAndUsers.order_menu)
+    await order_detail(callback.message, state)
+
+
+async def req_send_to_user(callback: CallbackQuery, state: FSMContext):
+
+    current_state = await state.get_state()
+
+    data = await state.get_data()
+    requisites = data["money_info"][3]
+    order_id = data["order_data"][0]
+    user_id = data["user_data"][1]
+
+    if str(current_state) in str(FSMOrdersAndUsers.confirm_req_send):
+
+        msg = (
+            f"Реквизиты для оплаты:\n"
+            f"Номер карты: {requisites}\n"
+            f"Комментарий к переводу: byhedzy-{order_id}"
+        )
+
+    else:
+        msg = (
+            f"Один из Ваших заказов готов к выдаче!\n\n"
+            f"Реквизиты для оплаты доставки:\n"
+            f"Номер карты: {requisites}\n"
+            f"Комментарий к переводу: byhedzy-{order_id}"
+        )
+
+    await callback.message.bot.send_message(
+        user_id,
+        text=msg,
+        reply_markup=cli.pay_for_order_kb,
+    )
+    await state.set_state(FSMOrdersAndUsers.req_send_to_user)
+    await confirm_req_send(callback, state)
 
 
 async def user_menu(callback: CallbackQuery, state: FSMContext):
@@ -1010,11 +1137,49 @@ async def delete_user(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Пользователь успешно удален!")
 
 
+async def pay_check_ok(callback: CallbackQuery, state: FSMContext):
+
+    order_id, user_id = await oif.find_user_id(callback.message.text)
+
+    await callback.message.edit_text(
+        "Сообщение отправлено!"
+    )
+
+    msg = (
+        f"Оплата за заказ под номером {order_id} успешно подтверждена!\n"
+        "Ожидайте доставки товара!"
+    )
+
+    await callback.message.bot.send_message(
+        user_id,
+        text=msg,
+    )
+
+
+async def pay_check_fail(callback: CallbackQuery, state: FSMContext):
+
+    order_id, user_id = await oif.find_user_id(callback.message.text)
+
+    await callback.message.edit_text(
+        "Сообщение отправлено!"
+    )
+
+    msg = (
+        f"Оплата за заказ под номером {order_id} не прошла!\n"
+        "Свяжитесь со службой поддержки в разделе 'Служба поддержки'."
+    )
+
+    await callback.message.bot.send_message(
+        user_id,
+        text=msg,
+    )
+
+
 def register_handlers_admin(dp):
 
     dp.register_message_handler(
         insert_money_info_db,
-        lambda message: message.text in ("Курс", "Комиссия") or message.text.isdigit(),
+        lambda message: "Курс:" in message.text or message.text.isdigit(),
         state=[FSMComissions.all_insert, FSMComissions.insert_course_change, FSMComissions.insert_comission_change]
     )
     dp.register_callback_query_handler(main_menu, lambda callback: callback.data == "main_menu", state="*")
@@ -1045,7 +1210,7 @@ def register_handlers_admin(dp):
     dp.register_callback_query_handler(promo_list_cancel, lambda callback: "return drive" in callback.data, state="*")
     dp.register_callback_query_handler(promo_generate_accept, lambda callback: "promo_auto" in callback.data, state=FSMOther.promo_code_start)
     dp.register_callback_query_handler(promo_manual_create, lambda callback: "promo_manual" in callback.data, state=FSMOther.promo_code_start)
-    dp.register_message_handler(faq_section, lambda message: "Ответы на вопросы" in message.text, state="*")
+    dp.register_message_handler(faq_section, lambda message: "Изменение информации" in message.text, state="*")
     dp.register_message_handler(faq_input, state=FSMContactAndFAQ.faq)
     dp.register_message_handler(contact_change, lambda message: "Изменение контактов" in message.text, state="*")
     dp.register_message_handler(contact_insert_db, state=FSMContactAndFAQ.contact_input)
@@ -1097,13 +1262,13 @@ def register_handlers_admin(dp):
     dp.register_callback_query_handler(change_status_confirm, lambda callback: callback.data.startswith("edit_status_"), state=FSMOrdersAndUsers.change_status)
 
     # Хендлеры для функции пропуска отправки сообщения
-    dp.register_callback_query_handler(skip_message, lambda callback: "skip_text_to_user" in callback.data, state=FSMOrdersAndUsers.change_status_confirm)
+    dp.register_callback_query_handler(skip_message, lambda callback: "skip_text_to_user" in callback.data, state=[FSMOrdersAndUsers.change_status_confirm, FSMOrdersAndUsers.ready_to_pick])
 
     # Хендлеры для функции ввода сообщения
-    dp.register_callback_query_handler(message_insert, lambda callback: "add_text_to_user" in callback.data, state=FSMOrdersAndUsers.change_status_confirm)
+    dp.register_callback_query_handler(message_insert, lambda callback: "add_text_to_user" in callback.data, state=[FSMOrdersAndUsers.change_status_confirm, FSMOrdersAndUsers.ready_to_pick])
 
     # Хендлеры для функции отправки сообщения
-    dp.register_message_handler(message_send, state=FSMOrdersAndUsers.message_insert)
+    dp.register_message_handler(message_send, state=[FSMOrdersAndUsers.message_insert, FSMOrdersAndUsers.ready_to_pick_ins])
 
     dp.register_message_handler(
         order_detail,
@@ -1124,3 +1289,7 @@ def register_handlers_admin(dp):
     dp.register_callback_query_handler(confirm_user_changes, lambda callback: "confirm_user_changes" in callback.data, state=FSMOrdersAndUsers.confirm_user_changes)
     dp.register_callback_query_handler(confirm_delete_user, lambda callback: "delete_user" in callback.data, state=FSMOrdersAndUsers.user_detail)
     dp.register_callback_query_handler(delete_user, lambda callback: "delete_user_confirm" in callback.data, state=FSMOrdersAndUsers.user_delete)
+    dp.register_callback_query_handler(send_requisites, lambda callback: "req_send" in callback.data, state=[FSMOrdersAndUsers.order_detail, FSMOrdersAndUsers.ready_to_pick, FSMOrdersAndUsers.ready_to_pick_confirm])
+    dp.register_callback_query_handler(req_send_to_user, lambda callback: "confirm_req_send" in callback.data, state=[FSMOrdersAndUsers.confirm_req_send, FSMOrdersAndUsers.ready_to_pick, FSMOrdersAndUsers.ready_ok])
+    dp.register_callback_query_handler(pay_check_ok, lambda callback: "payment_ok" in callback.data, state="*")
+    dp.register_callback_query_handler(pay_check_fail, lambda callback: "payment_fail" in callback.data, state="*")

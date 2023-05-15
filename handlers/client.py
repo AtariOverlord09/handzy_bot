@@ -7,9 +7,10 @@ from aiogram import Dispatcher
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 
-import keyboards as kb
+from keyboards import client_kb as kb, client_inline as kbl
 from database import sqlite_db
 from validators import client_validators as valid
+from core import message_for_admins as msa, order_id_finder as oif
 
 
 class FSMClient(StatesGroup):
@@ -48,6 +49,16 @@ class FSMClient(StatesGroup):
     url_validate = State()
     price_validate = State()
 
+    cancel_order_to_eblan = State()
+    eblan_pay_order = State()
+
+
+class FSMPayment(StatesGroup):
+    payment = State()
+    waiting_for_confirmation = State()
+    waiting_for_result = State()
+    use_points = State()
+
 
 async def command_start(message: Message, state: FSMContext):
     await message.reply(
@@ -58,7 +69,8 @@ async def command_start(message: Message, state: FSMContext):
         reply_markup=kb.client_keyboard,
         parse_mode=ParseMode.HTML,
     )
-    if not await sqlite_db.sql_check_user("user_id", message.from_user.id):
+    user = await sqlite_db.sql_check_user("user_id", message.from_user.id)
+    if not user:
         async with state.proxy() as data:
             data['user_id'] = message.from_user.id
             data['username'] = message.from_user.username
@@ -70,8 +82,7 @@ async def command_start(message: Message, state: FSMContext):
             data['registration_date'] = str(datetime.now())
             data['last_order_date'] = ''
             await sqlite_db.sql_add_user(data)
-    user = await sqlite_db.sql_check_user("user_id", message.from_user.id)
-    print(user)
+
     await state.set_state(FSMClient.start)
 
 
@@ -97,7 +108,7 @@ async def make_order(message: Message, state: FSMContext):
             "Выберите товар для заказа. \n"
             "Для этого просто пришлите ссылку на сам товар из сайта POIZON."
         ),
-        reply_markup=kb.url_question_kb,
+        reply_markup=kbl.url_question_kb,
         parse_mode=ParseMode.HTML,
     )
     current_state = await state.get_state()
@@ -129,7 +140,7 @@ async def shoes_size(message: Message, state: FSMContext):
 
     await message.answer(
             "Введите нужный размер.",
-            reply_markup=kb.size_kb,
+            reply_markup=kbl.size_kb,
     )
 
 
@@ -142,7 +153,7 @@ async def shoes_price(message: Message, state: FSMContext):
                 "Введите стоимость товара.\n"
                 "Вводите цену, которая указана на сайте и только цифры."
             ),
-            reply_markup=kb.cancel_kb,
+            reply_markup=kbl.cancel_kb,
         )
 
     if str(current_state) in str(FSMClient.edit_price):
@@ -176,24 +187,74 @@ async def addition(message: Message, state: FSMContext):
             "Вы можете оставить дополнительную информацию о товаре. \n"
             "Введите дополнительную информацию, например, расцветку."
         ),
-        reply_markup=kb.cancel_kb,
+        reply_markup=kbl.cancel_kb,
     )
 
 
 async def approve_order(query: CallbackQuery, state: FSMContext):
     await query.message.edit_reply_markup(reply_markup=None)
 
-    amount = await sqlite_db.get_amount_for_order(query.message.chat.id)
     async with state.proxy() as data:
-        data["amount"] = amount
         await sqlite_db.sql_add_order(data)
     await query.message.answer(
         "Ваш заказ был успешно принят на рассмотрение!"
-        "\nCовсем скоро мы напишем Вам!\n"
+        "\nCовсем скоро мы пришлём Вам реквизиты и стоимость заказа с учетом доп. условий!\n"
         "Ожидайте подтверждения заявки...",
         reply_markup=kb.client_keyboard,
     )
+
+    data = await state.get_data()
+    await msa.send_mess_to_admins(query.message, state)
     await state.set_state(FSMClient.start)
+
+
+async def payment_information(callback: CallbackQuery, state: FSMContext):
+
+    current_state = await state.get_state()
+    order_id = await sqlite_db.get_order_id()
+    money_info = await sqlite_db.get_money_info()
+    price = await state.get_data()
+    price = price["price"]
+    user = await sqlite_db.sql_check_user("user_id", callback.message.chat.id)
+    points = user[3]
+    keyboard = kbl.payment_kb
+    result_payment = int(price) * int(money_info[1]) + int(money_info[2])
+
+    if str(current_state) in str(FSMPayment.use_points):
+        keyboard = kbl.payment_use_points_kb
+        result_payment = result_payment - points
+        points = 0
+
+    msg = (
+        f"Номер заказа: {order_id}\n"
+        f"Сумма к оплате: {result_payment} руб.\n"
+        f"Количество BYN баллов: {points}"
+
+    )
+
+    async with state.proxy() as data:
+        data["res_price"] = result_payment
+        data["points"] = points
+        data["order_id"] = order_id
+        data["user_username"] = user[9]
+
+    await callback.message.edit_text(
+        text=msg,
+        reply_markup=keyboard,
+    )
+    await state.set_state(FSMPayment.payment)
+
+
+async def use_points(callback: CallbackQuery, state: FSMContext):
+
+    data = await state.get_data()
+    async with state.proxy() as data:
+        data["points_spend"] = data["points"]
+
+    await sqlite_db.use_points(callback.message.chat.id)
+
+    await state.set_state(FSMPayment.use_points)
+    await payment_information(callback, state)
 
 
 async def order_view(message: Message, state: FSMContext):
@@ -207,7 +268,7 @@ async def order_view(message: Message, state: FSMContext):
                 data["additional_params"] = message.caption or ""
             else:
                 data["additional_params"] = message.text
-        data["stat"] = "В обработке"
+        data["stat"] = "Не обработан"
         data['date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         data['user_id'] = message.from_user.id
 
@@ -224,7 +285,7 @@ async def order_view(message: Message, state: FSMContext):
                 f"{'Цена:':<25} {data['price']}\n"
                 f"{'Доп. информация:':<23} {data['additional_params']}"
             ),
-            reply_markup=kb.cancel_or_approve,
+            reply_markup=kbl.cancel_or_approve,
             parse_mode=ParseMode.HTML,
         )
     else:
@@ -235,7 +296,7 @@ async def order_view(message: Message, state: FSMContext):
             f"{'Размер:':<25} {data['size']}\n"
             f"{'Цена:':<25} {data['price']}\n"
             f"{'Доп. информация:':<23} {data['additional_params']}",
-            reply_markup=kb.cancel_or_approve
+            reply_markup=kbl.cancel_or_approve
         )
 
     await state.set_state(FSMClient.waiting_for_approve)
@@ -309,7 +370,7 @@ async def profile_view(message: Message, state: FSMContext):
         f"Количество заказов: {user[3]}\n"
         f"Номер аккаунта: {user[0]}\n"
         f"Привязан: VK/TG",
-        reply_markup=kb.profile_kb,
+        reply_markup=kbl.profile_kb,
     )
     await state.set_state(FSMClient.profile_view)
 
@@ -326,7 +387,7 @@ async def change_name(callback: CallbackQuery, state: FSMContext):
     await state.set_state(FSMClient.waiting_for_name)
     await callback.message.edit_text(
         text="Введите новое имя",
-        reply_markup=kb.name_change,
+        reply_markup=kbl.name_change,
     )
 
 
@@ -347,7 +408,7 @@ async def process_order_page(callback_query: CallbackQuery, state: FSMContext):
     page_number = int(callback_query.data.split("#")[1]) if "#" in callback_query.data else 1
     await callback_query.message.edit_text(
         text=await sqlite_db.sql_check_order(callback_query.message, user_id, page_number),
-        reply_markup=kb.get_keyboard(user_id, page_number)
+        reply_markup=kbl.get_keyboard(user_id, page_number)
     )
 
 
@@ -361,7 +422,7 @@ async def view_sync_key(callback: CallbackQuery, state: FSMContext):
 async def actual_money_course(message: Message, state: FSMContext):
     await message.answer(
         text="Введите стоимость товара в юанях",
-        reply_markup=kb.actual_course_kb,
+        reply_markup=kbl.actual_course_kb,
     )
     await state.set_state(FSMClient.actual_course)
 
@@ -382,7 +443,7 @@ async def prise_calculation(message: Message, state: FSMContext):
 async def promo_activation(message: Message, state: FSMContext):
     await message.answer(
         "Введите промокод",
-        reply_markup=kb.cancel_kb,
+        reply_markup=kbl.cancel_kb,
     )
     await state.set_state(FSMClient.promo_activation)
 
@@ -394,20 +455,20 @@ async def promo_check(message: Message, state: FSMContext):
     if not is_working:
         await message.answer(
             text="Такого промокода нет или превышен лимит использования",
-            reply_markup=kb.cancel_kb,
+            reply_markup=kbl.cancel_kb,
         )
     else:
         is_used = await sqlite_db.is_promo_used(promo_from_user, message.from_user.id)
         if not is_used:
             await message.answer(
                 text="Промокод активирован!",
-                reply_markup=kb.cancel_kb,
+                reply_markup=kbl.cancel_kb,
             )
             await sqlite_db.update_promo(promo_from_user, promo[0], message.from_user.id)
         else:
             await message.answer(
                 text="Такой промокод уже использован!",
-                reply_markup=kb.cancel_kb,
+                reply_markup=kbl.cancel_kb,
             )
 
 
@@ -417,31 +478,31 @@ async def poizon_install(message: Message, state: FSMContext):
             "Здесь Вы сможете скачать приложение POIZON!\n"
             "Правда удобно?"
         ),
-        reply_markup=kb.poizon_install_kb
+        reply_markup=kbl.poizon_install_kb
     )
     await state.set_state(FSMClient.pozion_install)
 
 
-async def pozion_file_load(callback: CallbackQuery, state: FSMContext):
-    try:
-        await callback.message.edit_text(
-            text="Скачать POIZON",
-        )
-
-        with open("poizon_apk/apk.txt", "rb") as file:
-            document = InputFile(file)
-            await callback.message.answer_document(
-                document=document,
-                reply_markup=kb.cancel_kb,
-            )
-    except Exception as e:
-        print(f"Failed to send document: {e}")
+# async def pozion_file_load(callback: CallbackQuery, state: FSMContext):
+#     try:
+#         await callback.message.edit_text(
+#             text="Скачать POIZON",
+#         )
+# 
+#         with open("poizon_apk/apk.txt", "rb") as file:
+#             document = InputFile(file)
+#             await callback.message.answer_document(
+#                 document=document,
+#                 reply_markup=kbl.cancel_kb,
+#             )
+#     except Exception as e:
+#         print(f"Failed to send document: {e}")
 
 
 async def sync_accounts(message: Message, state: FSMContext):
     await message.answer(
         text="Этот раздел находится в разработке...",
-        reply_markup=kb.cancel_kb,
+        reply_markup=kbl.cancel_kb,
     )
     await state.set_state(FSMClient.sync_accounts)
 
@@ -450,7 +511,7 @@ async def answer_to_question(message: Message, state: FSMContext):
     question_answer = await sqlite_db.answer_question()
     await message.answer(
         text=question_answer,
-        reply_markup=kb.cancel_kb,
+        reply_markup=kbl.cancel_kb,
     )
     await state.set_state(FSMClient.answer_to_question)
 
@@ -461,9 +522,38 @@ async def support(message: Message, state: FSMContext):
             "Напишите нам если у вас возникли какие-то проблемы!\n"
             "Мы всегда рады Вам помочь!"
         ),
-        reply_markup=kb.support_kb,
+        reply_markup=kbl.support_kb,
     )
     await state.set_state(FSMClient.support)
+
+
+async def cancel_order_to_eblan(callback: CallbackQuery, state: FSMContext):
+
+    order_id = await oif.find_order_id(callback.message.text)
+
+    data = await state.get_data()
+    order_id = data['order_data'][0]
+
+    await sqlite_db.delete_order(order_id)
+
+    await callback.message.edit_text(
+        text="Вы отменили заказ!",
+        reply_markup=kbl.cancel_kb,
+    )
+    await state.set_state(FSMClient.cancel_order_to_eblan)
+    await msa.send_mess_to_admins(callback.message, state, order_id)
+
+
+async def eblan_pay_order(callback: CallbackQuery, state: FSMContext):
+
+    order_id = await oif.find_order_id(callback.message.text)
+
+    await callback.message.edit_text(
+        text="Ожидайте подтверждения...",
+        reply_markup=kbl.cancel_kb,
+    )
+    await state.set_state(FSMClient.eblan_pay_order)
+    await msa.send_mess_to_admins(callback.message, state, order_id)
 
 
 def register_handlers_client(DP: Dispatcher):
@@ -488,9 +578,9 @@ def register_handlers_client(DP: Dispatcher):
     DP.register_message_handler(promo_activation, lambda message: "промокода" in message.text, state="*")
     DP.register_message_handler(promo_check, state=FSMClient.promo_activation)
     DP.register_message_handler(poizon_install, lambda message: "POIZON" in message.text, state="*")
-    DP.register_callback_query_handler(pozion_file_load, lambda query: "install" in query.data, state=FSMClient.pozion_install)
+    # DP.register_callback_query_handler(pozion_file_load, lambda query: "install" in query.data, state=FSMClient.pozion_install)
     DP.register_message_handler(sync_accounts, lambda message: "Синхронизация" in message.text, state="*")
-    DP.register_message_handler(answer_to_question, lambda message: "Ответы" in message.text, state="*")
+    DP.register_message_handler(answer_to_question, lambda message: "Ответы на вопросы" in message.text, state="*")
     DP.register_message_handler(support, lambda message: "Служба" in message.text, state="*")
 
     DP.register_message_handler(
@@ -520,4 +610,8 @@ def register_handlers_client(DP: Dispatcher):
 
 
     DP.register_callback_query_handler(edit_data, lambda query: query.data.startswith("edit"), state=FSMClient.waiting_for_approve)
-    DP.register_callback_query_handler(approve_order, lambda query: "approve" in query.data, state=FSMClient.waiting_for_approve)
+    DP.register_callback_query_handler(approve_order, lambda query: "payment_confirm" in query.data, state=FSMPayment.payment)
+    DP.register_callback_query_handler(payment_information, lambda query: "approve" in query.data, state=FSMClient.waiting_for_approve)
+    DP.register_callback_query_handler(use_points, lambda query: "points_confirm" in query.data, state=FSMPayment.payment)
+    DP.register_callback_query_handler(cancel_order_to_eblan, lambda query: "eblan" in query.data, state="*")
+    DP.register_callback_query_handler(eblan_pay_order, lambda query: "pay_for_order" in query.data, state="*")

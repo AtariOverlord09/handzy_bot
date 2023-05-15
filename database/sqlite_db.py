@@ -102,15 +102,16 @@ async def sql_add_order(data, edit=False):
         # Если заказ не существует, создаем новую запись
         if 'photo_id' in data:
             cur.execute(
-                'INSERT INTO orders (url, size, price, photo_id, additional_info, date, points_spent, status, user_id) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (data['url'], data['size'], data['price'], data['photo_id'], data['additional_params'], data['date'], data['amount'], data["stat"], data['user_id'])
+                'INSERT INTO orders (url, size, price, photo_id, additional_info, payment_amount, date, points_spent, status, user_id) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (data['url'], data['size'], data['price'], data['photo_id'], data['additional_params'], data["res_price"], data['date'], data.get('points_spent', 0), data["stat"], data['user_id'])
             )
         else:
             cur.execute(
-                'INSERT INTO orders (url, size, price, additional_info, date, points_spent, status, user_id) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                (data['url'], data['size'], data['price'], data['additional_params'], data['date'], data['amount'], data["stat"], data['user_id'])
+
+                'INSERT INTO orders (url, size, price, additional_info, payment_amount, date, points_spent, status, user_id) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (data['url'], data['size'], data['price'], data['additional_params'], data["res_price"], data['date'], data.get('points_spent', 0), data["stat"], data['user_id'])
             )
 
     base.commit()
@@ -235,6 +236,8 @@ async def update_promo(promo_code, promo_id, user_id):
     cur = base.cursor()
     cur.execute("INSERT INTO user_promo_codes (user_id, promo_code_id) VALUES (?, ?)", (user_id, promo_id))
     cur.execute("UPDATE promo_codes SET activated=activated+1 WHERE promo_code=?", (promo_code,))
+    amount = cur.execute('''SELECT amount FROM promo_codes WHERE promo_code=?''', (promo_code,)).fetchone()
+    cur.execute('''UPDATE users SET points=points+? WHERE user_id=?''', (amount[0], user_id))
     base.commit()
     base.close()
 
@@ -283,7 +286,11 @@ async def get_admin(user_id):
 async def insert_money_info(course, comission):
     base = sq.connect('byhedzy.db')
     cur = base.cursor()
-    cur.execute("UPDATE money_info SET actual_course=?, commission=? WHERE id=1", (course, comission))
+    money_info = cur.execute('''SELECT * FROM money_info''').fetchone()
+    if money_info is None:
+        cur.execute("INSERT INTO money_info (actual_course, commission) VALUES (?, ?)", (course, comission))
+    else:
+        cur.execute("UPDATE money_info SET actual_course=?, commission=? WHERE id=1", (course, comission))
     base.commit()
     base.close()
 
@@ -633,3 +640,37 @@ async def delete_user(user_id):
         print(f"An error occurred: {str(e)}")
         conn.rollback()
         conn.close()
+
+
+async def get_order_id():
+    base = sq.connect('byhedzy.db')
+    cur = base.cursor()
+    order_id = cur.execute("SELECT id FROM orders ORDER BY id DESC LIMIT 1").fetchone()
+    base.close()
+    if order_id:
+        return order_id[0] + 1
+    return 1
+
+
+async def use_points(user_id):
+    base = sq.connect('byhedzy.db')
+    cur = base.cursor()
+    cur.execute('''UPDATE users SET points=0 WHERE user_id=?''', (user_id,))
+    base.commit()
+    base.close()
+
+
+async def get_all_admins():
+    base = sq.connect('byhedzy.db')
+    cur = base.cursor()
+    admins = cur.execute("SELECT admin_id FROM admins").fetchall()
+    base.close()
+    return admins
+
+
+async def delete_order(order_id):
+    base = sq.connect('byhedzy.db')
+    cur = base.cursor()
+    cur.execute('''DELETE FROM orders WHERE id=?''', (order_id,))
+    base.commit()
+    base.close()

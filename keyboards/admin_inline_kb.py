@@ -89,6 +89,11 @@ class InlineAdminKeyboard:
             self.main_manu_button
         )
 
+        self.card_main = InlineKeyboardMarkup(row_width=1)
+        self.card_main.add(
+            self.main_manu_button,
+        )
+
         self.promo_accept_kb = InlineKeyboardMarkup(row_width=1)
         self.promo_accept_kb.add(
             InlineKeyboardButton(
@@ -134,6 +139,12 @@ class InlineAdminKeyboard:
                 "Вернуться к листу заказов",
                 callback_data="return_to_list",
             ),
+        )
+        self.order_detail_kb.add(
+            InlineKeyboardButton(
+                "Отправить пользователю реквизиты",
+                callback_data="req_send",
+            )
         )
         self.order_detail_kb.add(
             InlineKeyboardButton(
@@ -283,6 +294,47 @@ class InlineAdminKeyboard:
             ),
             self.main_manu_button,
         )
+
+        self.send_req_kb = InlineKeyboardMarkup(row_width=1)
+        self.send_req_kb.add(
+            InlineKeyboardButton(
+                "Подтверить",
+                callback_data="confirm_req_send",
+            ),
+            self.main_manu_button
+        )
+        self.yes_no_kb = InlineKeyboardMarkup(row_width=1)
+        self.yes_no_kb.add(
+            InlineKeyboardButton(
+                text="Подтвердить",
+                callback_data="yes_to_send"
+            ),
+            InlineKeyboardButton(
+                text="Пропустить",
+                callback_data="no_to_send",
+            ),
+        )
+
+        self.pay_check = InlineKeyboardMarkup(row_width=1)
+        self.pay_check.add(
+            InlineKeyboardButton(
+                "Подтвердить оплату",
+                callback_data="payment_ok"
+            ),
+            InlineKeyboardButton(
+                "Оплата не прошла",
+                callback_data="payment_fail"
+            )
+        )
+
+    async def get_pay_check(self):
+        return self.pay_check
+
+    async def get_yes_no_kb(self):
+        return self.yes_no_kb
+
+    async def get_send_req_kb(self):
+        return self.send_req_kb
 
     async def get_user_default_kb(self):
         return self.user_default_kb

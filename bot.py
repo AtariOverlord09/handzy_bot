@@ -1,14 +1,13 @@
-from aiogram import executor, types
+from aiogram import executor
 
-from handlers import client, admin
-from create_bot import DP, BOT
+from handlers import client, admin, other
+from create_bot import DP
 from database import sqlite_db
 
 
 async def online(_):
     print("Бот начал работу")
     sqlite_db.sql_start()
-
 
 
 '''*****************************АДМИНСКАЯ ЧАСТЬ****************************'''
@@ -24,5 +23,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()
