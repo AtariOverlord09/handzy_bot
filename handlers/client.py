@@ -433,8 +433,8 @@ async def prise_calculation(message: Message, state: FSMContext):
     rub_price = yuan_price * int(money_data[0])
     total_price = rub_price + int(money_data[1])
     await message.answer(
-        f"Курс: {money_data[0]}\n"
-        f"Комиссия: {money_data[1]}\n"
+        f"Курс: {money_data[1]}\n"
+        f"Комиссия: {money_data[2]}\n"
         f"Стоимость без учета доставки: {total_price}\n"
         "Доставка оплачивается по прибытию."
     )
