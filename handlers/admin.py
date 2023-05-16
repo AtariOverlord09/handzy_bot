@@ -1184,13 +1184,13 @@ def register_handlers_admin(dp):
     )
     dp.register_callback_query_handler(main_menu, lambda callback: callback.data == "main_menu", state="*")
     dp.register_message_handler(admin_menu, commands=['admin_bot'], state="*")
-    dp.register_message_handler(comission_change, lambda message: message.text == "Изменить комиссию и/или курс валюты", state="*")
+    dp.register_message_handler(comission_change, lambda message: "Изменить комиссию и/или курс валют" in message.text, state="*")
     dp.register_callback_query_handler(insert_comission_change, lambda callback: "change" in callback.data, state=FSMComissions.comission_course)
 
     dp.register_callback_query_handler(actual_course, lambda callback: callback.data == "check_uan", state=FSMComissions.comission_course)
     dp.register_callback_query_handler(back, lambda callback: callback.data == "back", state=FSMComissions.previous_state)
 
-    dp.register_message_handler(change_requisites, lambda message: message.text == "Изменение реквизитов", state="*")
+    dp.register_message_handler(change_requisites, lambda message: "реквизитов" in message.text, state="*")
     dp.register_message_handler(accept_card, state=FSMMoneyInfo.change_requisites)
     dp.register_callback_query_handler(accept_card_yes, lambda callback: callback.data == "accept_card", state=FSMMoneyInfo.accept_card)
     dp.register_callback_query_handler(cancel_card, lambda callback: callback.data == "cancel_card", state=FSMMoneyInfo.accept_card)
